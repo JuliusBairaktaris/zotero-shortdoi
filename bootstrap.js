@@ -1,221 +1,103 @@
-if (typeof Zotero == 'undefined') {
-    var Zotero;
-}
+// Zotero 8+ bootstrap: Zotero, Services, Cc, Ci are available in this scope.
+
 var ShortDOI;
+var DoiService;
+var DoiHttp;
+var DoiUpdater;
+var Menus;
 var chromeHandle;
 
-let mainWindowListener;
+const FTL_FILE = "zoteroshortdoi.ftl";
 
 function log(msg) {
-    Zotero.debug("DOI Manager: " + msg);
-}
-
-// In Zotero 6, bootstrap methods are called before Zotero is initialized, and using include.js
-// to get the Zotero XPCOM service would risk breaking Zotero startup. Instead, wait for the main
-// Zotero window to open and get the Zotero object from there.
-//
-// In Zotero 7, bootstrap methods are not called until Zotero is initialized, and the 'Zotero' is
-// automatically made available.
-async function waitForZotero() {
-    if (typeof Zotero != 'undefined') {
-        await Zotero.initializationPromise;
-        return;
-    }
-
-    var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
-    var windows = Services.wm.getEnumerator('navigator:browser');
-    var found = false;
-    while (windows.hasMoreElements()) {
-        let win = windows.getNext();
-        if (win.Zotero) {
-            Zotero = win.Zotero;
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        await new Promise((resolve) => {
-            var listener = {
-                onOpenWindow: function (aWindow) {
-                    // Wait for the window to finish loading
-                    let domWindow = aWindow
-                        .QueryInterface(Ci.nsIInterfaceRequestor)
-                        .getInterface(
-                            Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow
-                        );
-                    domWindow.addEventListener(
-                        "load",
-                        function () {
-                            domWindow.removeEventListener(
-                                "load",
-                                arguments.callee,
-                                false
-                            );
-                            if (domWindow.Zotero) {
-                                Services.wm.removeListener(listener);
-                                Zotero = domWindow.Zotero;
-                                resolve();
-                            }
-                        },
-                        false
-                    );
-                },
-            };
-            Services.wm.addListener(listener);
-        });
-    }
-    await Zotero.initializationPromise;
-}
-
-// Adds main window open/close listeners in Zotero 6
-function listenForMainWindowEvents() {
-    mainWindowListener = {
-        onOpenWindow: function (aWindow) {
-            let domWindow = aWindow
-                .QueryInterface(Ci.nsIInterfaceRequestor)
-                .getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow);
-            async function onload() {
-                domWindow.removeEventListener("load", onload, false);
-                if (
-                    domWindow.location.href !==
-                    "chrome://zotero/content/standalone/standalone.xul"
-                ) {
-                    return;
-                }
-                onMainWindowLoad({ window: domWindow });
-            }
-            domWindow.addEventListener("load", onload, false);
-        },
-        onCloseWindow: async function (aWindow) {
-            let domWindow = aWindow
-                .QueryInterface(Ci.nsIInterfaceRequestor)
-                .getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow);
-            if (
-                domWindow.location.href !==
-                "chrome://zotero/content/standalone/standalone.xul"
-            ) {
-                return;
-            }
-            onMainWindowUnload({ window: domWindow });
-        },
-    };
-    Services.wm.addListener(mainWindowListener);
-}
-
-function removeMainWindowListener() {
-    if (mainWindowListener) {
-        Services.wm.removeListener(mainWindowListener);
-    }
-}
-
-// Loads default preferences from prefs.js in Zotero 6
-function setDefaultPrefs(rootURI) {
-    var branch = Services.prefs.getDefaultBranch("");
-    var obj = {
-        pref(pref, value) {
-            switch (typeof value) {
-                case 'boolean':
-                    branch.setBoolPref(pref, value);
-                    break;
-                case 'string':
-                    branch.setStringPref(pref, value);
-                    break;
-                case 'number':
-                    branch.setIntPref(pref, value);
-                    break;
-                default:
-                    Zotero.logError(`Invalid type '${typeof (value)}' for pref '${pref}'`);
-            }
-        },
-    };
-    Services.scriptloader.loadSubScript(rootURI + "prefs.js", obj);
+  Zotero.debug(`DOI Manager: ${msg}`);
 }
 
 async function install() {
-    await waitForZotero();
-
-    log("Installed");
+  await Zotero.initializationPromise;
+  log("Installed");
 }
 
 async function startup({ id, version, resourceURI, rootURI = resourceURI.spec }) {
-    await waitForZotero();
+  await Zotero.initializationPromise;
+  log("Starting");
 
-    log("Starting");
+  const aomStartup = Cc["@mozilla.org/addons/addon-manager-startup;1"]
+    .getService(Ci.amIAddonManagerStartup);
+  const manifestURI = Services.io.newURI(`${rootURI}manifest.json`);
+  chromeHandle = aomStartup.registerChrome(manifestURI, [
+    ["content", "zoteroshortdoi", "content/"],
+    ["locale", "zoteroshortdoi", "en-US", "locale/en-US/"],
+    ["locale", "zoteroshortdoi", "de", "locale/de/"],
+  ]);
 
-    // 'Services' may not be available in Zotero 6
-    if (typeof Services == 'undefined') {
-        var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
-    }
+  Services.scriptloader.loadSubScript(`${rootURI}lib/doi-service.js`);
+  Services.scriptloader.loadSubScript(`${rootURI}lib/doi-http.js`);
+  Services.scriptloader.loadSubScript(`${rootURI}lib/doi-updater.js`);
+  Services.scriptloader.loadSubScript(`${rootURI}lib/menus.js`);
+  Services.scriptloader.loadSubScript(`${rootURI}zoteroshortdoi.js`);
 
-    if (Zotero.platformMajorVersion < 102) {
-        // Listen for window load/unload events in Zotero 6, since onMainWindowLoad/Unload don't
-        // get called
-        listenForMainWindowEvents();
-        // Read prefs from prefs.js in Zotero 6
-        setDefaultPrefs(rootURI);
-    }
+  setDefaultPrefs(rootURI);
 
-    var aomStartup = Cc[
-        "@mozilla.org/addons/addon-manager-startup;1"
-    ].getService(Ci.amIAddonManagerStartup);
-    var manifestURI = Services.io.newURI(rootURI + "manifest.json");
-    chromeHandle = aomStartup.registerChrome(manifestURI, [
-        ["locale", "zoteroshortdoi", "en-US", "locale/en-US/"],
-        ["locale", "zoteroshortdoi", "de", "locale/de/"],
-    ]);
+  Zotero.PreferencePanes.register({
+    pluginID: "zoteroshortdoi@wiernik.org",
+    src: `${rootURI}content/options.xhtml`,
+  });
 
-    Services.scriptloader.loadSubScript(rootURI + "zoteroshortdoi.js");
+  // Inject the FTL into every already-open main window. onMainWindowLoad
+  // covers windows opened later, but Zotero does not retroactively call it
+  // for windows that were open when the plugin started.
+  for (const win of Zotero.getMainWindows()) {
+    if (win.MozXULElement) win.MozXULElement.insertFTLIfNeeded(FTL_FILE);
+  }
 
-    ShortDOI.init({ id, version, rootURI });
-
-    if (Zotero.platformMajorVersion >= 102) {
-        Zotero.PreferencePanes.register({
-            pluginID: 'zoteroshortdoi@wiernik.org',
-            src: rootURI + 'content/options.xhtml',
-            //scripts: ['prefs.js'],
-            //stylesheets: ['prefs.css'],
-        });
-    }
-
-    ShortDOI.addToAllWindows();
+  ShortDOI.init({ id, version, rootURI });
+  log("Startup complete");
 }
 
+function setDefaultPrefs(rootURI) {
+  const branch = Services.prefs.getDefaultBranch("");
+  const obj = {
+    pref(pref, value) {
+      switch (typeof value) {
+        case "boolean":
+          branch.setBoolPref(pref, value);
+          break;
+        case "string":
+          branch.setStringPref(pref, value);
+          break;
+        case "number":
+          branch.setIntPref(pref, value);
+          break;
+        default:
+          Zotero.logError(`Invalid type '${typeof value}' for pref '${pref}'`);
+      }
+    },
+  };
+  Services.scriptloader.loadSubScript(`${rootURI}prefs.js`, obj);
+}
+
+// MenuManager renders into the host document via Fluent's data-l10n-id, so the
+// FTL must be present in each main window. MenuManager itself does not load
+// plugin FTL files (see TODO in zotero/xpcom/pluginAPI/menuManager.js).
 function onMainWindowLoad({ window }) {
-    ShortDOI.addToWindow(window);
-}
-
-function onMainWindowUnload({ window }) {
-    ShortDOI.removeFromWindow(window);
-
-    window.addEventListener(
-        "unload",
-        function (e) {
-            Zotero.Notifier.unregisterObserver(ShortDOI.notifierID);
-        },
-        false
-    );
+  window.MozXULElement.insertFTLIfNeeded(FTL_FILE);
 }
 
 function shutdown() {
-    log("Shutting down");
-
-    if (Zotero.platformMajorVersion < 102) {
-        removeMainWindowListener();
-    }
-
+  log("Shutting down");
+  if (ShortDOI) ShortDOI.shutdown();
+  if (chromeHandle) {
     chromeHandle.destruct();
     chromeHandle = null;
-
-    ShortDOI.removeFromAllWindows();
-    ShortDOI = undefined;
+  }
+  ShortDOI = undefined;
+  Menus = undefined;
+  DoiUpdater = undefined;
+  DoiHttp = undefined;
+  DoiService = undefined;
 }
 
 function uninstall() {
-    // `Zotero` object isn't available in `uninstall()` in Zotero 6, so log manually
-    if (typeof Zotero == 'undefined') {
-        dump("DOI Manager: Uninstalled\n\n");
-        return;
-    }
-
-    log("Uninstalled");
+  log("Uninstalled");
 }
